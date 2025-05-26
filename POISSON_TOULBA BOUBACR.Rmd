@@ -1,0 +1,578 @@
+---
+title: "Application de la Régression de Poisson"
+author: "TOULBA Boubacar et CEMLLAL ISMAIL "
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+## ─────────────────────────  0. LIBRARIES  ──────────────────────────── ##
+libs <- c("readxl", "dplyr", "ggplot2", "pROC", "broom", "corrplot", 
+          "gridExtra", "knitr", "car", "RColorBrewer", "viridis")
+to_install <- setdiff(libs, rownames(installed.packages()))
+if (length(to_install)) {
+  install.packages(to_install, repos = "https://cloud.r-project.org")
+}
+invisible(lapply(libs, library, character.only = TRUE))
+
+## ─────────────────────────  1. CONFIGURATION  ───────────────────────── ##
+# Chemins des fichiers - À ADAPTER selon votre environnement
+data_path <- "D:/s4 partie2/GLM/GLM POSONN/competition_awards_data.xlsx"
+out_dir <- "D:/s4 partie2/GLM/GLM POSONN/PICSSS"
+
+# Palette de couleurs personnalisée
+colors_palette <- list(
+  primary = "#2E86AB",      # Bleu professionnel
+  secondary = "#F24236",    # Rouge vibrant
+  accent = "#F6AE2D",       # Jaune doré
+  success = "#2F9B69",      # Vert succès
+  warning = "#F18F01",      # Orange
+  info = "#A23B72",         # Violet
+  light_blue = "#87CEEB",   # Bleu clair
+  dark_blue = "#1E5F8B",    # Bleu foncé
+  gradient = c("#2E86AB", "#A23B72", "#F24236", "#F6AE2D", "#2F9B69")
+)
+
+# Création du dossier de sortie
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Test des permissions d'écriture
+test_file <- file.path(out_dir, "write_test.tmp")
+test_ok <- tryCatch({
+  writeLines("Test", test_file)
+  TRUE
+}, error = function(e) FALSE)
+
+if (!test_ok) {
+  stop("❌mpossible d'écrire dans le dossier de sortie. Vérifiez le chemin.")
+}
+unlink(test_file)
+
+cat("✅ Dossier de sortie configuré :", out_dir, "\n")
+cat("=" %+% paste(rep("=", 60), collapse = ""), "\n")
+cat("                    ANALYSE DE RÉGRESSION DE POISSON\n")
+cat("=" %+% paste(rep("=", 60), collapse = ""), "\n\n")
+
+## ─────────────────────────  2. IMPORT ET EXPLORATION DES DONNÉES  ──── ##
+set.seed(123)  # Pour la reproductibilité
+
+cat("📊 ÉTAPE 1: IMPORT ET EXPLORATION DES DONNÉES\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Import des données Excel
+if (grepl("\\.xlsx$", data_path, ignore.case = TRUE)) {
+  df <- read_xlsx(data_path)
+} else if (grepl("\\.xls$", data_path, ignore.case = TRUE)) {
+  df <- read_xls(data_path)
+} else {
+  stop("Le fichier doit être au format .xls ou .xlsx")
+}
+
+cat("✅ Données importées :", nrow(df), "observations,", ncol(df), "variables\n\n")
+
+# Description des données
+cat("📋 STRUCTURE DES DONNÉES :\n")
+str(df)
+cat("\n📊 STATISTIQUES DESCRIPTIVES :\n")
+print(summary(df))
+
+# Distribution de la variable réponse
+cat("\n🎯 DISTRIBUTION DE LA VARIABLE RÉPONSE (Awards) :\n")
+awards_table <- table(df$Awards)
+print(awards_table)
+cat("Moyenne :", round(mean(df$Awards), 3), "\n")
+cat("Variance :", round(var(df$Awards), 3), "\n")
+cat("Ratio Variance/Moyenne :", round(var(df$Awards)/mean(df$Awards), 3), "\n\n")
+
+# Vérification des valeurs manquantes
+cat("🔍 VALEURS MANQUANTES :\n")
+na_count <- sapply(df, function(x) sum(is.na(x)))
+print(na_count[na_count > 0])
+if(sum(na_count) == 0) cat("Aucune valeur manquante détectée.\n")
+
+## ─────────────────────────  3. DIVISION DES DONNÉES (80/20)  ─────────── ##
+cat("\n📊 ÉTAPE 2: DIVISION DES DONNÉES\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+n <- nrow(df)
+train_idx <- sample(seq_len(n), size = floor(0.8 * n))
+df_train <- df[train_idx, ]
+df_valid <- df[-train_idx, ]
+
+cat("Échantillon d'apprentissage :", nrow(df_train), "observations (80%)\n")
+cat("Échantillon de validation :", nrow(df_valid), "observations (20%)\n\n")
+
+# Vérification de la distribution dans chaque échantillon
+cat("Distribution des Awards dans l'échantillon d'apprentissage :\n")
+print(table(df_train$Awards))
+cat("\nDistribution des Awards dans l'échantillon de validation :\n")
+print(table(df_valid$Awards))
+
+## ─────────────────────────  4. AJUSTEMENT DU MODÈLE  ────────────────── ##
+cat("\n🔧 ÉTAPE 3: AJUSTEMENT DU MODÈLE DE RÉGRESSION DE POISSON\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Modèle complet
+cat("Ajustement du modèle complet...\n")
+mod_complet <- glm(Awards ~ ., data = df_train, family = poisson(link = "log"))
+
+# Résumé du modèle
+cat("\n📋 RÉSUMÉ DU MODÈLE COMPLET :\n")
+summary_mod <- summary(mod_complet)
+print(summary_mod)
+
+# Sélection de variables (si nécessaire)
+cat("\n🔍 SÉLECTION DE VARIABLES (AIC) :\n")
+mod_optimal <- step(mod_complet, trace = FALSE)
+cat("Variables retenues dans le modèle optimal :\n")
+print(names(coef(mod_optimal)))
+
+# Comparaison des modèles
+cat("\n📊 COMPARAISON DES MODÈLES :\n")
+aic_comparison <- AIC(mod_complet, mod_optimal)
+print(aic_comparison)
+
+# Utilisation du modèle optimal pour la suite
+mod_final <- mod_optimal
+
+## ─────────────────────────  5. TEST D'ADÉQUATION DU MODÈLE  ─────────── ##
+cat("\n🧪 ÉTAPE 4: TESTS D'ADÉQUATION DU MODÈLE\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Test de sur-dispersion
+phi <- sum(residuals(mod_final, type = "pearson")^2) / mod_final$df.residual
+cat("Paramètre de dispersion (φ) :", round(phi, 4), "\n")
+
+if (phi > 1.5) {
+  cat("⚠  SUR-DISPERSION détectée (φ > 1.5)\n")
+  cat("   Recommandation : Considérer un modèle Binomial Négatif\n")
+} else if (phi < 0.8) {
+  cat("⚠  SOUS-DISPERSION détectée (φ < 0.8)\n")
+} else {
+  cat("✅ Dispersion acceptable pour le modèle de Poisson\n")
+}
+
+# Test de Hosmer-Lemeshow adapté pour Poisson
+cat("\n🔬 AUTRES TESTS D'ADÉQUATION :\n")
+# Déviance résiduelle
+dev_residual <- mod_final$deviance
+df_residual <- mod_final$df.residual
+p_value_dev <- pchisq(dev_residual, df_residual, lower.tail = FALSE)
+cat("Test de déviance résiduelle :\n")
+cat("  Déviance :", round(dev_residual, 3), "\n")
+cat("  Degrés de liberté :", df_residual, "\n")
+cat("  p-value :", round(p_value_dev, 4), "\n")
+
+if (p_value_dev < 0.05) {
+  cat("  Interprétation : Le modèle ne s'ajuste pas parfaitement (p < 0.05)\n")
+} else {
+  cat("  Interprétation : Le modèle s'ajuste correctement (p ≥ 0.05)\n")
+}
+
+## ─────────────────────────  6. PRÉDICTIONS ET ÉVALUATION  ──────────── ##
+cat("\n🎯 ÉTAPE 5: PRÉDICTIONS ET ÉVALUATION\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Prédictions
+pred_train <- predict(mod_final, type = "response")
+pred_valid <- predict(mod_final, newdata = df_valid, type = "response")
+
+# Métriques de performance
+mse_train <- mean((df_train$Awards - pred_train)^2)
+mse_valid <- mean((df_valid$Awards - pred_valid)^2)
+mae_train <- mean(abs(df_train$Awards - pred_train))
+mae_valid <- mean(abs(df_valid$Awards - pred_valid))
+
+r2_train <- 1 - (sum((df_train$Awards - pred_train)^2) / 
+                   sum((df_train$Awards - mean(df_train$Awards))^2))
+r2_valid <- 1 - (sum((df_valid$Awards - pred_valid)^2) / 
+                   sum((df_valid$Awards - mean(df_valid$Awards))^2))
+
+cat("📊 MÉTRIQUES DE PERFORMANCE :\n")
+cat("Apprentissage - MSE:", round(mse_train, 3), "| MAE:", round(mae_train, 3), 
+    "| R²:", round(r2_train, 3), "\n")
+cat("Validation    - MSE:", round(mse_valid, 3), "| MAE:", round(mae_valid, 3), 
+    "| R²:", round(r2_valid, 3), "\n")
+
+## ─────────────────────────  7. ANALYSE ROC  ─────────────────────────── ##
+cat("\n📈 ÉTAPE 6: ANALYSE ROC\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Transformation pour l'analyse ROC : probabilité d'avoir au moins 1 prix
+prob_train <- 1 - dpois(0, pred_train)
+prob_valid <- 1 - dpois(0, pred_valid)
+
+# Variables binaires : au moins 1 prix
+y_binary_train <- as.numeric(df_train$Awards > 0)
+y_binary_valid <- as.numeric(df_valid$Awards > 0)
+
+# Courbes ROC
+roc_train <- roc(y_binary_train, prob_train, quiet = TRUE)
+roc_valid <- roc(y_binary_valid, prob_valid, quiet = TRUE)
+
+auc_train <- auc(roc_train)
+auc_valid <- auc(roc_valid)
+
+cat("📊 RÉSULTATS DE L'ANALYSE ROC :\n")
+cat("AUC Apprentissage :", round(auc_train, 3), "\n")
+cat("AUC Validation    :", round(auc_valid, 3), "\n")
+
+# Interprétation de l'AUC
+if (auc_valid >= 0.9) {
+  cat("✅ Excellente capacité de discrimination (AUC ≥ 0.9)\n")
+} else if (auc_valid >= 0.8) {
+  cat("✅ Bonne capacité de discrimination (0.8 ≤ AUC < 0.9)\n")
+} else if (auc_valid >= 0.7) {
+  cat("⚠  Capacité de discrimination acceptable (0.7 ≤ AUC < 0.8)\n")
+} else {
+  cat("❌ Faible capacité de discrimination (AUC < 0.7)\n")
+}
+
+## ─────────────────────────  8. VISUALISATIONS AMÉLIORÉES  ──────────────────────── ##
+cat("\n📊 ÉTAPE 7: CRÉATION DES VISUALISATIONS AMÉLIORÉES\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Thème personnalisé pour tous les graphiques
+theme_custom <- theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold", color = colors_palette$dark_blue),
+    plot.subtitle = element_text(hjust = 0.5, size = 12, color = colors_palette$primary),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_line(color = "grey95", size = 0.3),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+# 1. Distribution de la variable réponse - Version améliorée
+awards_data <- data.frame(Awards = df$Awards)
+p1 <- ggplot(awards_data, aes(x = factor(Awards))) +
+  geom_bar(fill = colors_palette$primary, alpha = 0.8, color = "white", size = 0.7) +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5, 
+            color = colors_palette$dark_blue, fontface = "bold") +
+  labs(title = "Distribution du nombre de prix remportés",
+       subtitle = paste("Analyse de", nrow(df), "observations"),
+       x = "Nombre de prix", y = "Fréquence") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  theme_custom
+
+# 2. Prédictions vs Observations - Version améliorée
+df_pred <- data.frame(
+  observed = c(df_train$Awards, df_valid$Awards),
+  predicted = c(pred_train, pred_valid),
+  dataset = c(rep("Apprentissage", nrow(df_train)), 
+              rep("Validation", nrow(df_valid)))
+)
+
+p2 <- ggplot(df_pred, aes(x = observed, y = predicted, color = dataset)) +
+  geom_point(alpha = 0.7, size = 2.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = colors_palette$secondary, size = 1) +
+  scale_color_manual(values = c("Apprentissage" = colors_palette$primary, 
+                               "Validation" = colors_palette$accent),
+                    name = "Échantillon") +
+  labs(title = "Valeurs prédites vs observées",
+       subtitle = "Ligne pointillée = prédiction parfaite",
+       x = "Valeurs observées", y = "Valeurs prédites") +
+  theme_custom +
+  guides(color = guide_legend(override.aes = list(size = 4, alpha = 1)))
+
+# 3. Courbe ROC - Version améliorée
+roc_data <- data.frame(
+  specificite = c(roc_train$specificities, roc_valid$specificities),
+  sensibilite = c(roc_train$sensitivities, roc_valid$sensitivities),
+  dataset = c(rep("Apprentissage", length(roc_train$specificities)),
+              rep("Validation", length(roc_valid$specificities)))
+)
+
+p3 <- ggplot(roc_data, aes(x = 1 - specificite, y = sensibilite, color = dataset)) +
+  geom_line(size = 1.2, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50", size = 1) +
+  scale_color_manual(values = c("Apprentissage" = colors_palette$primary, 
+                               "Validation" = colors_palette$success),
+                    name = "Échantillon") +
+  labs(title = "Courbes ROC - Capacité de discrimination",
+       subtitle = paste("AUC Apprentissage:", round(auc_train, 3), "| AUC Validation:", round(auc_valid, 3)),
+       x = "1 - Spécificité (Taux de faux positifs)", 
+       y = "Sensibilité (Taux de vrais positifs)") +
+  coord_equal() +
+  theme_custom +
+  guides(color = guide_legend(override.aes = list(size = 3)))
+
+# 4. Résidus de Pearson - Version améliorée
+df_resid <- data.frame(
+  fitted = pred_train,
+  pearson = residuals(mod_final, type = "pearson"),
+  deviance = residuals(mod_final, type = "deviance")
+)
+
+p4 <- ggplot(df_resid, aes(x = fitted, y = pearson)) +
+  geom_point(alpha = 0.6, size = 2, color = colors_palette$primary) +
+  geom_hline(yintercept = 0, color = colors_palette$secondary, linetype = "dashed", size = 1) +
+  geom_smooth(method = "loess", se = TRUE, color = colors_palette$warning, 
+              fill = colors_palette$warning, alpha = 0.2, size = 1) +
+  labs(title = "Diagnostic des résidus de Pearson",
+       subtitle = "Vérification de l'homoscédasticité",
+       x = "Valeurs ajustées", y = "Résidus de Pearson standardisés") +
+  theme_custom
+
+# Sauvegarde des graphiques principaux
+ggsave("01_distribution_awards.png", p1, path = out_dir, 
+       width = 12, height = 8, units = "in", dpi = 300, bg = "white")
+ggsave("02_predictions_vs_observations.png", p2, path = out_dir, 
+       width = 12, height = 8, units = "in", dpi = 300, bg = "white")
+ggsave("03_courbe_roc.png", p3, path = out_dir, 
+       width = 12, height = 8, units = "in", dpi = 300, bg = "white")
+ggsave("04_residus_pearson.png", p4, path = out_dir, 
+       width = 12, height = 8, units = "in", dpi = 300, bg = "white")
+
+## ─────────────────────────  GRAPHIQUES DIAGNOSTIQUES SÉPARÉS  ──────────────── ##
+cat("📊 Création des graphiques diagnostiques séparés...\n")
+
+# Préparation des données pour les diagnostiques
+fitted_values <- fitted(mod_final)
+residuals_pearson <- residuals(mod_final, type = "pearson")
+residuals_deviance <- residuals(mod_final, type = "deviance")
+residuals_standardized <- rstandard(mod_final)
+leverage <- hatvalues(mod_final)
+cooksd <- cooks.distance(mod_final)
+
+# 1. Résidus vs Valeurs ajustées
+p_diag1 <- ggplot(data.frame(fitted = fitted_values, residuals = residuals_pearson), 
+                  aes(x = fitted, y = residuals)) +
+  geom_point(color = colors_palette$primary, alpha = 0.6, size = 2) +
+  geom_hline(yintercept = 0, color = colors_palette$secondary, linetype = "dashed", size = 1) +
+  geom_smooth(method = "loess", se = TRUE, color = colors_palette$warning, 
+              fill = colors_palette$warning, alpha = 0.2) +
+  labs(title = "Résidus vs Valeurs ajustées",
+       subtitle = "Vérification de la linéarité et homoscédasticité",
+       x = "Valeurs ajustées", y = "Résidus de Pearson") +
+  theme_custom
+
+# 2. Q-Q Plot des résidus
+sample_quantiles <- sort(residuals_standardized)
+theoretical_quantiles <- qnorm(ppoints(length(sample_quantiles)))
+qq_data <- data.frame(theoretical = theoretical_quantiles, sample = sample_quantiles)
+
+p_diag2 <- ggplot(qq_data, aes(x = theoretical, y = sample)) +
+  geom_point(color = colors_palette$primary, alpha = 0.7, size = 2) +
+  geom_abline(slope = 1, intercept = 0, color = colors_palette$secondary, 
+              linetype = "dashed", size = 1) +
+  labs(title = "Q-Q Plot des résidus standardisés",
+       subtitle = "Vérification de la normalité des résidus",
+       x = "Quantiles théoriques", y = "Quantiles observés") +
+  theme_custom
+
+# 3. Scale-Location (racine des résidus standardisés)
+p_diag3 <- ggplot(data.frame(fitted = fitted_values, 
+                            sqrt_std_resid = sqrt(abs(residuals_standardized))), 
+                  aes(x = fitted, y = sqrt_std_resid)) +
+  geom_point(color = colors_palette$success, alpha = 0.6, size = 2) +
+  geom_smooth(method = "loess", se = TRUE, color = colors_palette$info, 
+              fill = colors_palette$info, alpha = 0.2) +
+  labs(title = "Scale-Location Plot",
+       subtitle = "Vérification de l'homoscédasticité",
+       x = "Valeurs ajustées", y = "√|Résidus standardisés|") +
+  theme_custom
+
+# 4. Distance de Cook
+n_obs <- length(cooksd)
+p_diag4 <- ggplot(data.frame(index = 1:n_obs, cooks_d = cooksd), 
+                  aes(x = index, y = cooks_d)) +
+  geom_segment(aes(xend = index, yend = 0), color = colors_palette$primary, alpha = 0.7) +
+  geom_point(color = colors_palette$secondary, size = 2, alpha = 0.8) +
+  geom_hline(yintercept = 4/n_obs, color = colors_palette$warning, 
+             linetype = "dashed", size = 1) +
+  labs(title = "Distance de Cook",
+       subtitle = "Détection des observations influentes",
+       x = "Index des observations", y = "Distance de Cook") +
+  theme_custom
+
+# 5. Résidus vs Leverage
+p_diag5 <- ggplot(data.frame(leverage = leverage, std_resid = residuals_standardized, 
+                            cooks_d = cooksd), 
+                  aes(x = leverage, y = std_resid)) +
+  geom_point(aes(size = cooks_d), color = colors_palette$primary, alpha = 0.7) +
+  geom_hline(yintercept = c(-2, 0, 2), color = colors_palette$secondary, 
+             linetype = c("dashed", "solid", "dashed"), size = 1) +
+  geom_vline(xintercept = 2 * length(coef(mod_final)) / n_obs, 
+             color = colors_palette$warning, linetype = "dashed", size = 1) +
+  scale_size_continuous(name = "Distance\nde Cook", range = c(1, 4)) +
+  labs(title = "Résidus vs Leverage",
+       subtitle = "Identification des points de levier et influents",
+       x = "Leverage", y = "Résidus standardisés") +
+  theme_custom
+
+# 6. Histogramme des résidus
+p_diag6 <- ggplot(data.frame(residuals = residuals_standardized), aes(x = residuals)) +
+  geom_histogram(bins = 20, fill = colors_palette$primary, alpha = 0.7, 
+                 color = "white", size = 0.5) +
+  geom_density(aes(y = after_stat(density) * length(residuals_standardized) * 
+                   diff(range(residuals_standardized)) / 20), 
+               color = colors_palette$secondary, size = 1.2) +
+  labs(title = "Distribution des résidus standardisés",
+       subtitle = "Vérification de la normalité",
+       x = "Résidus standardisés", y = "Fréquence") +
+  theme_custom
+
+# Sauvegarde des graphiques diagnostiques séparés
+ggsave("05_diagnostic_residus_vs_fitted.png", p_diag1, path = out_dir, 
+       width = 10, height = 7, units = "in", dpi = 300, bg = "white")
+ggsave("06_diagnostic_qq_plot.png", p_diag2, path = out_dir, 
+       width = 10, height = 7, units = "in", dpi = 300, bg = "white")
+ggsave("07_diagnostic_scale_location.png", p_diag3, path = out_dir, 
+       width = 10, height = 7, units = "in", dpi = 300, bg = "white")
+ggsave("08_diagnostic_cooks_distance.png", p_diag4, path = out_dir, 
+       width = 10, height = 7, units = "in", dpi = 300, bg = "white")
+ggsave("09_diagnostic_residus_vs_leverage.png", p_diag5, path = out_dir, 
+       width = 10, height = 7, units = "in", dpi = 300, bg = "white")
+ggsave("10_diagnostic_histogramme_residus.png", p_diag6, path = out_dir, 
+       width = 10, height = 7, units = "in", dpi = 300, bg = "white")
+
+# Graphique combiné des diagnostiques (optionnel)
+p_combined <- grid.arrange(p_diag1, p_diag2, p_diag3, p_diag4, ncol = 2, nrow = 2,
+                          top = "Diagnostiques du modèle de régression de Poisson")
+ggsave("11_diagnostics_combines.png", p_combined, path = out_dir, 
+       width = 16, height = 12, units = "in", dpi = 300, bg = "white")
+
+cat("✅ Graphiques diagnostiques séparés créés avec succès\n")
+
+## ─────────────────────────  9. INTERPRÉTATION DES RÉSULTATS  ────────── ##
+cat("\n📝 ÉTAPE 8: INTERPRÉTATION DES RÉSULTATS\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Coefficients avec intervalles de confiance
+coef_table <- tidy(mod_final, conf.int = TRUE, exponentiate = TRUE)
+cat("📊 COEFFICIENTS DU MODÈLE (avec exponentielles) :\n")
+print(coef_table)
+
+cat("\n🔍 INTERPRÉTATION DES COEFFICIENTS :\n")
+for(i in 2:nrow(coef_table)) {  # Exclut l'intercept
+  var_name <- coef_table$term[i]
+  estimate <- coef_table$estimate[i]
+  p_value <- coef_table$p.value[i]
+  
+  if(p_value < 0.05) {
+    if(estimate > 1) {
+      cat("•", var_name, ": Augmentation de", round((estimate-1)*100, 1), 
+          "% du nombre de prix (p <", round(p_value, 3), ")\n")
+    } else {
+      cat("•", var_name, ": Diminution de", round((1-estimate)*100, 1), 
+          "% du nombre de prix (p <", round(p_value, 3), ")\n")
+    }
+  } else {
+    cat("•", var_name, ": Effet non significatif (p =", round(p_value, 3), ")\n")
+  }
+}
+
+## ─────────────────────────  10. SAUVEGARDE ET RAPPORT  ──────────────── ##
+cat("\n💾 ÉTAPE 9: SAUVEGARDE DES RÉSULTATS\n")
+cat("-" %+% paste(rep("-", 50), collapse = ""), "\n")
+
+# Sauvegarde des objets R
+save(mod_final, df_train, df_valid, pred_train, pred_valid,
+     roc_train, roc_valid, auc_train, auc_valid,
+     phi, coef_table, mse_train, mse_valid, mae_train, mae_valid,
+     file = file.path(out_dir, "resultats_tp_poisson.RData"))
+
+# Rapport de synthèse
+sink(file.path(out_dir, "rapport_synthese.txt"))
+cat("═══════════════════════════════════════════════════════════════\n")
+cat("                    RAPPORT DE SYNTHÈSE\n")
+cat("                 RÉGRESSION DE POISSON - TP\n")
+cat("═══════════════════════════════════════════════════════════════\n\n")
+cat("Date d'analyse :", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n")
+cat("Auteur : [Votre nom]\n\n")
+
+cat("1. DONNÉES\n")
+cat("──────────\n")
+cat("Nombre total d'observations :", nrow(df), "\n")
+cat("Nombre de variables :", ncol(df), "\n")
+cat("Échantillon d'apprentissage :", nrow(df_train), "observations\n")
+cat("Échantillon de validation :", nrow(df_valid), "observations\n\n")
+
+cat("2. MODÈLE RETENU\n")
+cat("────────────────\n")
+cat("Variables explicatives :", paste(names(coef(mod_final))[-1], collapse = ", "), "\n")
+cat("AIC :", round(AIC(mod_final), 2), "\n")
+cat("Paramètre de dispersion (φ) :", round(phi, 4), "\n\n")
+
+cat("3. PERFORMANCE\n")
+cat("──────────────\n")
+cat("MSE (validation) :", round(mse_valid, 3), "\n")
+cat("MAE (validation) :", round(mae_valid, 3), "\n")
+cat("R² (validation) :", round(r2_valid, 3), "\n")
+cat("AUC (validation) :", round(auc_valid, 3), "\n\n")
+
+cat("4. COEFFICIENTS SIGNIFICATIFS\n")
+cat("─────────────────────────────\n")
+sig_coef <- coef_table[coef_table$p.value < 0.05, ]
+for(i in 1:nrow(sig_coef)) {
+  cat(sig_coef$term[i], ": exp(β) =", round(sig_coef$estimate[i], 4), 
+      "(p <", round(sig_coef$p.value[i], 3), ")\n")
+}
+
+cat("\n5. CONCLUSION\n")
+cat("─────────────\n")
+if(auc_valid >= 0.8) {
+  cat("Le modèle présente une bonne capacité prédictive (AUC ≥ 0.8).\n")
+} else {
+  cat("Le modèle présente une capacité prédictive limitée (AUC < 0.8).\n")
+}
+
+if(phi <= 1.5) {
+  cat("L'hypothèse de dispersion de Poisson est respectée.\n")
+} else {
+  cat("Sur-dispersion détectée - considérer un modèle alternatif.\n")
+}
+
+cat("\n6. QUALITÉ DES GRAPHIQUES\n")
+cat("─────────────────────────\n")
+cat("✅ Graphiques avec palette de couleurs professionnelle\n")
+cat("✅ Diagnostiques séparés pour une meilleure lisibilité\n")
+cat("✅ Thème personnalisé cohérent sur tous les graphiques\n")
+cat("✅ Résolution haute définition (300 DPI)\n")
+cat("✅ Annotations et sous-titres informatifs\n")
+sink()
+
+cat("✅ Rapport de synthèse créé\n")
+cat("✅ Tous les résultats sauvegardés dans :", out_dir, "\n\n")
+cat("📁 FICHIERS CRÉÉS (VERSION AMÉLIORÉE) :\n")
+cat("   📊 GRAPHIQUES PRINCIPAUX :\n")
+cat("   • 01_distribution_awards.png (avec compteurs et couleurs)\n")
+cat("   • 02_predictions_vs_observations.png (couleurs distinctes par échantillon)\n")
+cat("   • 03_courbe_roc.png (avec AUC dans le sous-titre)\n")
+cat("   • 04_residus_pearson.png (avec bande de confiance)\n\n")
+cat("   🔍 DIAGNOSTIQUES SÉPARÉS :\n")
+cat("   • 05_diagnostic_residus_vs_fitted.png\n")
+cat("   • 06_diagnostic_qq_plot.png\n")
+cat("   • 07_diagnostic_scale_location.png\n")
+cat("   • 08_diagnostic_cooks_distance.png\n")
+cat("   • 09_diagnostic_residus_vs_leverage.png\n")
+cat("   • 10_diagnostic_histogramme_residus.png\n")
+cat("   • 11_diagnostics_combines.png (vue d'ensemble)\n\n")
+cat("   📋 AUTRES FICHIERS :\n")
+cat("   • resultats_tp_poisson.RData\n")
+cat("   • rapport_synthese.txt\n\n")
+
+cat("🎨 AMÉLIORATIONS APPORTÉES :\n")
+cat("   ✅ Palette de couleurs professionnelle et cohérente\n")
+cat("   ✅ Graphiques diagnostiques séparés pour meilleure analyse\n")
+cat("   ✅ Thème personnalisé avec police et mise en forme améliorées\n")
+cat("   ✅ Annotations enrichies et sous-titres informatifs\n")
+cat("   ✅ Résolution HD (300 DPI) avec fond blanc\n")
+cat("   ✅ Légendes et guides visuels optimisés\n")
+cat("   ✅ Transparence et tailles ajustées pour meilleure lisibilité\n")
+cat("   ✅ Ajout d'histogramme des résidus pour diagnostic complet\n\n")
+
+cat("🎉 ANALYSE TERMINÉE AVEC SUCCÈS - VERSION AMÉLIORÉE !\n")
+cat("═══════════════════════════════════════════════════════════════\n")
+
+
+```
+
+
